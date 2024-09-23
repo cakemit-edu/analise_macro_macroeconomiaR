@@ -1,0 +1,530 @@
+---
+title:  Introdução à Macroeconomia
+author: Claudia Tanaka
+date:   "Atualizado em `r format(Sys.time(), '%d/%m/%Y')`"
+
+output:
+  bookdown::html_document2:
+    toc: yes
+    toc_float: yes
+    fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message=FALSE, warning=FALSE )
+options(scipen=999) # "Desliga" notação científica. 000 para ligar.
+
+# PACOTES 
+library(fpp3)
+
+# PRETTY DOC
+library(gt)
+library(patchwork)
+
+theme_set(theme_light(base_size=9))
+theme_update(
+  panel.grid.minor = element_blank(),
+  panel.grid.major = element_line(colour="gray90", size=0.1),
+  plot.title = element_text(size=10, colour="gray30", face="bold"),
+  plot.subtitle = element_text(face='italic', colour="gray50", size=9),
+  plot.caption = element_text(colour="gray50", hjust=0, size=7),
+  legend.title = element_blank(),
+  strip.background = element_rect(fill="gray40"),
+)
+```
+
+\
+
+# Setup {-}
+
+Pacotes e ambiente de programação
+
+```{r}
+print(sessionInfo(), locale=FALSE)
+```
+
+\
+
+**datasets**
+
+```{r}
+suppressMessages(
+  
+df.pib <- 
+  rbind(
+    sidrar::get_sidra(
+      api="/t/6612/n1/all/v/all/p/all/c11255/90707/d/v9318%202"
+    ) |>
+      janitor::clean_names() |>
+      select(trimestre_codigo, variavel, valor, unidade_de_medida),
+    sidrar::get_sidra(
+      api="/t/1846/n1/all/v/all/p/all/c11255/90707/d/v585%200"
+    ) |>
+      janitor::clean_names() |>
+      select(trimestre_codigo, variavel, valor, unidade_de_medida),
+    sidrar::get_sidra(
+      api="/t/1620/n1/all/v/all/p/all/c11255/90707/d/v583%204"
+    ) |> 
+      janitor::clean_names() |> 
+      select(trimestre_codigo, variavel, valor, unidade_de_medida),
+    sidrar::get_sidra(
+      api="/t/1621/n1/all/v/all/p/all/c11255/90707/d/v584%204"
+    ) |> 
+      janitor::clean_names() |> 
+      select(trimestre_codigo, variavel, valor, unidade_de_medida)
+  ) |> 
+  mutate(
+    id_trimestre = lubridate::yq(trimestre_codigo) |> yearquarter(),
+    .before=everything()
+  ) |> 
+  select(-trimestre_codigo, -unidade_de_medida) |> 
+  as_tsibble(index = id_trimestre, key = c(variavel)) |> 
+  fill_gaps() |> 
+  mutate(
+    variavel = case_match(
+      variavel,
+      "Série encadeada do índice de volume trimestral (Base: média 1995 = 100)" 
+      ~ "num_indice",
+      
+      "Série encadeada do índice de volume trimestral com ajuste sazonal (Base: média 1995 = 100)"
+      ~ "num_indice_sa",
+      
+      "Valores a preços correntes" ~ "pib_nominal",
+      
+      "Valores encadeados a preços de 1995" ~ "valores_encadeados95",
+      
+      .default = NA
+    )
+  ) |> 
+  pivot_wider(names_from=variavel, values_from=valor) |>
+  mutate(
+    # pib real com valores encadeados a preços do trimestre mais recente
+    pib_real = (max(valores_encadeados95) / valores_encadeados95) * pib_nominal,
+    
+    # Variação trimestre contra trimestre imediatamente anterior (t contra t-1)
+    var_trimestral = (num_indice_sa / lag(x = num_indice_sa, n = 1) - 1) * 100,
+    
+    # Variação trimestre contra mesmo trimestre do ano anterior (t contra t-4)
+    var_interanual = (num_indice / lag(x = num_indice, n = 4) - 1) * 100,
+    
+    # Variação acumulada em 12 meses (4 trimestres)
+    var_anual = (
+      zoo::rollsumr(num_indice, k=4, fill=NA) / (
+        zoo::rollsumr(num_indice, k=8, fill=NA) - 
+          zoo::rollsumr(num_indice, k=4, fill=NA)
+      ) - 1
+    ) * 100
+  )
+
+)
+```
+
+
+```{r}
+suppressMessages(
+  
+df.ipca <- 
+  sidrar::get_sidra(api="/t/1737/n1/all/v/2266/p/all/d/v2266%2013") |> 
+  janitor::clean_names() |> 
+  select(mes_codigo, variavel, valor, unidade_de_medida) |> 
+  mutate(id_mes = yearmonth(
+    paste0(
+      substr(mes_codigo, 1, 4), "-",
+      substr(mes_codigo, 5, 6)
+    )),
+    .before=everything()
+  ) |> 
+  select(-mes_codigo) |> 
+  as_tsibble(index = id_mes, key = c(variavel, unidade_de_medida)) |> 
+  fill_gaps() |> 
+  mutate(
+    variavel = case_match(
+      variavel,
+      "IPCA - Número-índice (base: dezembro de 1993 = 100)" ~ "num_indice",
+      .default = NA
+    )
+  ) |> 
+  pivot_wider(names_from=variavel, values_from=valor) |> 
+  mutate(
+    # Variação mês contra mês imediatamente anterior (t contra t-1)
+    var_mensal = (num_indice / lag(x = num_indice, n = 1) - 1) * 100,
+
+    # Variação acumulada em 12 meses
+    var_anual = (num_indice / lag(x = num_indice, n = 12) - 1) * 100
+  )
+  
+)
+```
+
+```{r}
+suppressMessages(
+  
+df.pnad <- 
+  sidrar::get_sidra(api="/t/4099/n1/all/v/4099/p/all/d/v4099%201") |> 
+  janitor::clean_names() |>
+  select(trimestre_codigo, variavel, valor, unidade_de_medida) |> 
+  mutate(id_trimestre = lubridate::yq(trimestre_codigo) |> yearquarter(),
+    .before=everything()
+  ) |> 
+  select(-trimestre_codigo, -unidade_de_medida) |> 
+  as_tsibble(index = id_trimestre, key = c(variavel)) |> 
+  fill_gaps() |> 
+  mutate(
+    variavel = case_match(
+      variavel,
+      "Taxa de desocupação, na semana de referência, das pessoas de 14 anos ou mais de idade" 
+      ~ "tx_desemprego",
+      .default = NA
+    )
+  ) |> 
+  pivot_wider(names_from=variavel, values_from=valor)
+  
+)
+```
+
+
+```{r message=FALSE}
+df.sal_min <- 
+  ipeadatar::ipeadata("MTE12_SALMIN12") |> 
+  select(date, salario_minimo=value) |>
+  mutate(id_mes = yearmonth(date), .before=everything()) |>
+  select(-date) |> 
+  as_tsibble(index = id_mes) |> 
+  fill_gaps()
+
+
+suppressMessages(
+  
+df.inpc <- 
+  sidrar::get_sidra(api="/t/1736/n1/all/v/2289/p/all/d/v2289%2013") |> 
+  janitor::clean_names() |> 
+  select(mes_codigo, variavel, valor, unidade_de_medida) |> 
+  mutate(id_mes = yearmonth(
+    paste0(
+      substr(mes_codigo, 1, 4), "-",
+      substr(mes_codigo, 5, 6)
+    )),
+    .before=everything()
+  ) |> 
+  select(-mes_codigo) |> 
+  as_tsibble(index = id_mes, key = c(variavel, unidade_de_medida)) |> 
+  fill_gaps()
+  
+)
+```
+
+
+```{r include=FALSE}
+colSums(is.na(df.ipca)) |> 
+  as.data.frame() |> 
+  rownames_to_column() |> rename(coluna=1,nulos=2) |> 
+  filter(nulos>0) |> 
+  arrange(desc(nulos))
+
+colSums(is.na(df.pib)) |> 
+  as.data.frame() |> 
+  rownames_to_column() |> rename(coluna=1,nulos=2) |> 
+  filter(nulos>0) |> 
+  arrange(desc(nulos))
+
+colSums(is.na(df.pnad)) |> 
+  as.data.frame() |> 
+  rownames_to_column() |> rename(coluna=1,nulos=2) |> 
+  filter(nulos>0) |> 
+  arrange(desc(nulos))
+
+colSums(is.na(df.sal_min)) |> 
+  as.data.frame() |> 
+  rownames_to_column() |> rename(coluna=1,nulos=2) |> 
+  filter(nulos>0) |> 
+  arrange(desc(nulos))
+```
+
+\
+
+# Introdução à Macroeconomia
+
+A macroeconomia é um ramo da ciência econômica que estuda o comportamento de uma economia como um todo. Em contraste, a microeconomia se preocupa em como os indivíduos e firmas tomam decisões. Por exemplo:
+
+-   A decisão de um trabalhador em fazer horas extras não é um problema macroeconômico;
+
+-   A taxa de inflação observada em uma economia é um problema macroeconômico.
+
+Dessa forma, os macroeconomistas preocupam-se em analisar indicadores agregados como PIB, taxa de desemprego e índices de preços para entender como toda a economia funciona.
+
+Em termos didáticos, você também pode pensar na distinção entre macro e micro com o uso de uma analogia:
+
+-   A macroeconomia procura olhar apenas para a floresta como um todo, sem se preocupar com as árvores;
+
+-   A microeconomia se preocupa com as árvores individualmente e se esquece da floresta.
+
+No entanto, a teoria econômica moderna combina conceitos micro e macro, de modo que a macroeconomia atual é microfundamentada. Dessa forma, muitos tópicos interessantes podem surgir e são estudados na macroeconomia, como:
+
+-   Por que o custo de vida continua subindo?
+
+-   Por que milhões de pessoas estão desempregadas, mesmo quando a economia está crescendo?
+
+-   O que causa recessões? E os ciclos econômicos?
+
+-   Aumentar a oferta monetária pode gerar mais crescimento?
+
+-   Por que tantos países são pobres? Quais políticas poderiam ajudá-los a sair da pobreza?
+
+-   O que determina o crescimento econômico de longo prazo da economia?
+
+-   A taxa de câmbio deve ser mantida em um nível fixo?
+
+-   Pode-se trocar um aumento da inflação por uma diminuição do desemprego?
+
+De forma a endereçar questões como essas os economistas costumam formular modelos, que podem ser entendidos como representações simplificadas do mundo real, usados como base para explicar relações ou realizar previsões.
+
+**Por exemplo**: um mapa é, em essência, um modelo para nos locomovermos de um ponto A a um ponto B.
+
+## Conceitos fundamentais
+
+-   **Ceteris paribus**: uma expressão do latim que significa "todo o mais é constante", ou seja, nada muda, exceto o fator ou fatores que estão sendo estudados;
+
+-   **Variável endógena**: também chamada de dependente, é a variável cujos valores são determinados no modelo;
+
+-   **Variável exógena**: também chamada de independente, é a variável cujos valores são determinados fora do modelo, ou seja, o modelo toma seus valores e comportamento como dados;
+
+-   **Preços flexíveis**: uma suposição de que os preços são flexíveis, ou seja, se ajustam para igualar oferta e demanda. Por exemplo: com o advento da pandemia da Covid-19 os preços de alimentação e bebidas aumentaram expressivamente no Brasil;
+
+-   **Preços rígidos**: no curto prazo, muitos preços são rígidos, ou seja, se ajustam lentamente em resposta a mudanças na oferta ou na demanda. Por exemplo: muitos contratos de trabalho fixam o salário nominal por 1 ano ou mais.
+
+-   **Agregados macroeconômicos**: aquelas variáveis que representam de forma agregada toda a economia de um país, sintetizando informações para a análise e comparações. Por exemplo: o PIB é a soma de todos os bens e serviços finais produzidos por um país em determinado período de tempo.
+
+-   **Fluxo**: magnitude econômica medida dentro de um intervalo de tempo. Por exemplo: PIB (taxa trimestral), salário (mensal), os pagamentos (periódicos) de uma dívida parcelada;
+
+-   **Estoque**: é uma magnitude medida em um determinado ponto específico no tempo. Por exemplo: saldo do CAGED no ano, dívida externa do país, população do país.
+
+## Metas de política econômica
+
+Os políticos devem ser aconselhados sobre como influenciar o comportamenteo da economia de modo que metas especificadas possam ser cumpridas de forma obimizada. Conforme Blanchard (2017), as metas são, geralmente, constituícas pelo tripé de **crescimento econômico**, **preços estáveis** e **baixo desemprego**
+
+
+```{r echo=FALSE, fig.width=4, fig.asp=1.5}
+df0 <- 
+  inner_join(
+    df.pib |> 
+      select(id_trimestre, "PIB (var. % anual)" = var_anual),
+    
+    df.ipca |> 
+      select(id_mes, var_anual) |> 
+      filter(month(id_mes) %in% c(3,6,9,12)) |>
+      mutate(id_trimestre = yearquarter(id_mes)) |> 
+      filter(!is.na(var_anual)) |> 
+      as_tsibble(index = id_trimestre) |> 
+      select(id_trimestre, "IPCA (var. % anual)" = var_anual),
+    
+    join_by(id_trimestre)
+  ) |> 
+  inner_join(
+    df.pnad |> 
+      select(id_trimestre, "Desemprego (%)" = tx_desemprego),
+    
+    join_by(id_trimestre)
+  ) |> 
+  pivot_longer(-1)
+  
+
+df0 |> 
+  ggplot(aes(x=as_date(id_trimestre), y=value, color=name)) +
+  facet_wrap(~name, ncol=1, scales="free_y") +
+  geom_line(na.rm=T) + geom_point(size=1) +
+  geom_hline(yintercept=0, color="black") +
+  scale_x_date(
+    date_minor_breaks = "1 year",
+    expand = expansion(mult=c(0.01,0.01))
+  ) +
+  scale_y_continuous(
+    labels=scales::number_format(big.mark=".", decimal.mark=",", suffix="%")
+  ) +
+  scale_color_brewer(palette = "Set1") +
+  theme(
+    legend.position="none",
+    panel.grid.minor.x = element_line(linetype="dotted")
+  ) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Principais variáveis macroeconômicas - Brasil",
+    subtitle = glue::glue("Por trimestre de {min(year(df0$id_trimestre))} a {format(max(df0$id_trimestre), '%Y (%qº trimestre)')}"),
+    caption = "Fonte: IBGE/SIDRA"
+  )
+```
+
+
+```{r include=FALSE}
+rm(df0); gc()
+```
+
+\
+
+# Deflacionando dados
+
+Algumas pessoas ainda devem se lembrar de quando era possível "fazer o rancho", as compras do mês, com apenas cem reais no bolso, mas já faz bastante tempo que uma simples ida ao supermercado é deveras custosa. O carro popular que podia ser adquirido por menos de R&#36; 30 mil nos anos 1990 é facilmente vendido por não menos de R&#36; 50 mil hoje. Ou seja, com uma nota de R$ 100 não se compra a mesma quantidade de bens hoje do que era possível há 20 anos e isso constitui um problema econômico básico, motivo pelo qual devemos deflacionar valores monetários para poder compará-los no tempo.
+
+Sendo assim, se queremos ter uma visão realística quando analisando uma série de preços, devemos transformar os valores nominais para valores deflacionados, ou reais, contabilizando o efeito inflacionário do período. Apesar de ser um procedimento padrão, costumam haver alguns equívocos, de modo que iremos esclarecer alguns pontos e explorar abordagens da técnica usando as linguagens R e Python.
+
+Em resumo, para transformar uma série de preços para valores reais, são necessárias duas coisas: 
+
+- Os **dados nominais**;
+- Um **índice de preços adequado**.
+
+A série de **dados nominais** pode ser qualquer uma que mede algo em **valores correntes (R&#36;)**, como por exemplo a série do salário mínimo, disponibilizada pelo **IPEADATA**.
+
+Já o **índice de preços** adequado pode vir de diversas fontes, os mais conhecidos no Brasil são o Índice Nacional de Preços ao Consumidor Amplo (IPCA), o Índice Nacional de Preços ao Consumidor (INPC) e o Índice Geral de Preços - Mercado (IGP-M), este divulgado pela **FGV** e aqueles pelo **IBGE**. O que esses índices fazem é medir o preço de uma cesta de produtos em um dado período de tempo, geralmente um mês cheio, em relação a um outro período de tempo base.
+
+Com esses dois dados em mãos, basta aplicar a **fórmula de deflacionamento** a seguir:
+
+$$Vr_{i:j} = (\frac{I_{j}}{I_{i}}) \times V_{i}$$
+onde:<br>
+$Vr_{i:j}$ é o valor real, ou deflacionado, no período $i$ na data-base $j$<br>
+$I_{j}$ é o índice de preços fixado na data-base $j$<br>
+$I_{i}$ é o índice de preços no período $i$<br>
+$V_{i}$ é o valor ou preço nominal no período $i$
+
+
+Com esta fórmula é possível obter o valor deflacionado a partir da multiplicação do valor nominal em um dado período pela razão entre o índice de preços na data-base de referência em relação ao índice no período de análise/interesse.
+
+Como exemplo, deflacionaremos a série do **salário mínimo** nominal do Brasil com o **INPC**, utilizando o período de 2000 até 2021. Os dados originais podem ser conferidos na tabela abaixo:
+
+```{r}
+df0 <- 
+  inner_join(
+    df.sal_min,
+    df.inpc |> select(id_mes, idx_inpc=valor),
+    join_by(id_mes)
+  ) |> 
+  fill_gaps()
+```
+
+
+
+Com base na fórmula de deflacionamento e nos dados, para obter o salário mínimo real precisamos apenas **definir qual será a data-base e, então, aplicar a fórmula** para obter o valor real para qualquer período de tempo que você estiver interessado.
+
+**Por exemplo**: 
+
+Se quiséssemos saber o salário mínimo **real** de julho de 2021 na data-base de dezembro de 2021, ou seja, o salário em 07/2021 a preços de 12/2021, a expressão seria
+
+$$\begin{align*}
+  Vr_{(i \ : \ j)} & = (\frac{I_{j}}{I_{i}}) \times V_{i} \\
+  Vr_{(07/21 \ : \ 12/21)} & = (\frac{6330.59_{(12/21)}}{6034.73_{(07/21)}}) \times 1100_{(07/21)} = 1153.93
+\end{align*}$$
+
+
+
+```{r}
+df0 <- 
+  df0 |> 
+  mutate(salario_minimo_real = (max(idx_inpc) / idx_inpc) * salario_minimo) |> 
+  filter(year(id_mes)>=1980)
+```
+
+
+\
+
+```{r echo=FALSE, fig.width=4, fig.asp=.8}
+df0 |> 
+  select(
+    id_mes, 
+    "Salário Mínimo Nominal" = salario_minimo, 
+    "Salário Mínimo Real" = salario_minimo_real
+  ) |>
+  pivot_longer(2:3) |>
+  ggplot(aes(x=as_date(id_mes), y=value, color=name)) +
+  geom_line(linewidth=.8, alpha=.8) +
+  scale_x_date(
+    date_minor_breaks="1 year",
+    expand=expansion(mult=c(0.01,0.01))
+  ) +
+  scale_color_brewer(palette="Set1") +
+  theme(
+    legend.position="top",
+    panel.grid.minor.x = element_line(linetype="dotted")
+  ) +
+  labs(
+    x = NULL, y = NULL, 
+    title = "Evolução do salário mínimo no Brasil",
+    subtitle = glue::glue(
+      "de {format(min(df0$id_mes), '%B de %Y')} a {format(max(df0$id_mes), '%B de %Y')}"
+    ),
+    caption = "\nFonte: IPEA/IPEADATA e IBGE/SIDRA\nNota: Salário mínimo deflacionado pelo INPC a valores do mês mais recente."
+  )
+```
+
+
+```{r include=FALSE}
+rm(df0); gc()
+```
+
+
+\
+
+# Contas Nacionais Trimestrais
+
+O **Sistema de Contas Nacionais (SCN)** é o conjunto padronizado de recomendações internacionalmente acordadas sobre como compilar as medidas de atividade econômica, de acordo com rígidas convenções contábeis baseadas em princípios econômicos. Saiba mais em: [https://unstats.un.org/unsd/nationalaccount/sna.asp](https://unstats.un.org/unsd/nationalaccount/sna.asp)
+
+No Brasil o responsável por compilar e divulgar essas estatísticas é o **IBGE** através do [**Sistema de Contas Nacionais Trimestrais (SCNT)**](https://www.ibge.gov.br/estatisticas/economicas/industria/9300-contas-nacionais-trimestrais.html?=&t=resultados). Nesse sistema são disponibilizados os valores correntes e índice de volume (1995=100) para:
+
+- Produto Interno Bruto (PIB) a preços de mercado;
+- Impostos sobre produtos;
+- Valor adicionado a preços básicos;
+- Consumo pessoal;
+- Consumo do governo;
+- Formação bruta de capital fixo (FBCF);
+- Variação de estoques
+- Exportações e importações de bens e serviços.
+
+Saiba mais em: [https://www.ibge.gov.br/estatisticas/economicas/industria/9300-contas-nacionais-trimestrais.html?=&t=o-que-e](https://www.ibge.gov.br/estatisticas/economicas/industria/9300-contas-nacionais-trimestrais.html?=&t=o-que-e)
+
+
+### PIB
+
+- **O que é o PIB?**
+
+O PIB é a soma de todos os bens e serviços **finais** produzidos por um país, estado ou cidade, geralmente em um ano. Todos os países calculam o seu PIB nas suas respectivas moedas.
+
+- **Por que bens e serviços finais?**
+
+O PIB mede apenas os bens e serviços finais para evitar **dupla contagem**. Por exemplo, se um país produz R&dollar; 100 de trigo, R&dollar; 200 de farinha de trigo e R&dollar; 300 de pão, seu PIB será de R&dollar; 300, pois os valores da farinha e do trigo já estão embutidos no valor do pão.
+
+\
+
+```{r echo=FALSE, fig.width=4}
+df.pib |>  
+  select(id_trimestre, var_anual) |> 
+  filter(!is.na(var_anual)) |> 
+  ggplot(aes(x=as_date(id_trimestre), y=var_anual)) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_line(linewidth=.7, color="#282f6b") +
+  scale_x_date(
+    date_minor_breaks="1 year",
+    expand=expansion(mult=c(0.01,0.01))
+  ) +
+  scale_y_continuous(
+    labels=scales::number_format(big.mark=".", decimal.mark=",", suffix="%")
+  ) +
+  theme(panel.grid.minor.x=element_line(linetype="dotted")) +
+  labs(
+    title    = "Crescimento do PIB",
+    subtitle = "Taxa acumulada em 4 trimestres",
+    x        = NULL, 
+    y        = NULL,
+    caption  = "Fonte: IBGE/SIDRA"
+  )
+```
+
+
+\
+
+***
+
+# Referências {- #references}
+
+Blanchard, O. (2017). *Macroeconomics.* Pearson Education Limited.
+
+IBGE - Instituto Brasileiro de Geografia e Estatística. *Contas nacionais trimestrais*: ano de referência 2010. Rio de Janeiro: IBGE, 2016. Disponível em: https://biblioteca.ibge.gov.br/visualizacao/livros/liv96834.pdf. Acesso em: 07 jun. 2021.
+
+Mankiw, N. G. (2018). *Macroeconomics.* Macmillan Higher Education.
