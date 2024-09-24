@@ -37,9 +37,9 @@ theme_update(
 
 # Setup {-}
 
-Pacotes e ambiente de programação
+Pacotes e ambiente de programação:
 
-```{r}
+```{r echo=FALSE}
 print(sessionInfo(), locale=FALSE)
 ```
 
@@ -52,32 +52,31 @@ suppressMessages(
   
 df.pib <- 
   rbind(
+    # Tabela 6612: Valores encadeados a preços de 1995
     sidrar::get_sidra(
       api="/t/6612/n1/all/v/all/p/all/c11255/90707/d/v9318%202"
-    ) |>
-      janitor::clean_names() |>
-      select(trimestre_codigo, variavel, valor, unidade_de_medida),
+    ),
+    # Tabela 1846: Valores a preços correntes (Milhões de Reais)
     sidrar::get_sidra(
       api="/t/1846/n1/all/v/all/p/all/c11255/90707/d/v585%200"
-    ) |>
-      janitor::clean_names() |>
-      select(trimestre_codigo, variavel, valor, unidade_de_medida),
+    ),
+    # Tabela 1620: Série encadeada do índice de volume trimestral 
+    # (Base: média 1995 = 100)
     sidrar::get_sidra(
       api="/t/1620/n1/all/v/all/p/all/c11255/90707/d/v583%204"
-    ) |> 
-      janitor::clean_names() |> 
-      select(trimestre_codigo, variavel, valor, unidade_de_medida),
+    ),
+    # Tabela 1621: Série encadeada do índice de volume trimestral com ajuste sazonal
+    # (Base: média 1995 = 100)
     sidrar::get_sidra(
       api="/t/1621/n1/all/v/all/p/all/c11255/90707/d/v584%204"
-    ) |> 
-      janitor::clean_names() |> 
-      select(trimestre_codigo, variavel, valor, unidade_de_medida)
-  ) |> 
+    )
+  )  |> 
+  janitor::clean_names() |> 
+  select(id_trimestre=trimestre_codigo, variavel, valor) |> 
   mutate(
-    id_trimestre = lubridate::yq(trimestre_codigo) |> yearquarter(),
+    id_trimestre = lubridate::yq(id_trimestre) |> yearquarter(),
     .before=everything()
   ) |> 
-  select(-trimestre_codigo, -unidade_de_medida) |> 
   as_tsibble(index = id_trimestre, key = c(variavel)) |> 
   fill_gaps() |> 
   mutate(
@@ -91,29 +90,140 @@ df.pib <-
       
       "Valores a preços correntes" ~ "pib_nominal",
       
-      "Valores encadeados a preços de 1995" ~ "valores_encadeados95",
+      "Valores encadeados a preços de 1995" ~ "pib_real95",
       
       .default = NA
     )
   ) |> 
   pivot_wider(names_from=variavel, values_from=valor) |>
   mutate(
-    # pib real com valores encadeados a preços do trimestre mais recente
-    pib_real = (max(valores_encadeados95) / valores_encadeados95) * pib_nominal,
+    pib_deflator = pib_nominal / pib_real95 * 100,
+    
+    # Variação anual acumulada em 12 meses (4 trimestres)
+    var_yoy_12m_preco = (
+      zoo::rollsumr(pib_deflator, k=4, fill=NA) / (
+        zoo::rollsumr(pib_deflator, k=8, fill=NA) - 
+          zoo::rollsumr(pib_deflator, k=4, fill=NA)
+      ) - 1
+    ) * 100,
     
     # Variação trimestre contra trimestre imediatamente anterior (t contra t-1)
-    var_trimestral = (num_indice_sa / lag(x = num_indice_sa, n = 1) - 1) * 100,
+    var_qoq_qtd = (num_indice_sa / lag(x = num_indice_sa, n = 1) - 1) * 100,
     
     # Variação trimestre contra mesmo trimestre do ano anterior (t contra t-4)
-    var_interanual = (num_indice / lag(x = num_indice, n = 4) - 1) * 100,
+    var_yoy_3m_qtd = (num_indice / lag(x = num_indice, n = 4) - 1) * 100,
     
-    # Variação acumulada em 12 meses (4 trimestres)
-    var_anual = (
+    # Variação anual acumulada em 12 meses (4 trimestres)
+    var_yoy_12m_qtd = (
       zoo::rollsumr(num_indice, k=4, fill=NA) / (
         zoo::rollsumr(num_indice, k=8, fill=NA) - 
           zoo::rollsumr(num_indice, k=4, fill=NA)
       ) - 1
     ) * 100
+  ) |> 
+  arrange(id_trimestre) |> 
+  select(id_trimestre,
+         pib_nominal,          # preços correntes - mudanças de qtd e preço
+         pib_real95,           # preços constantes - mudanças de qtd
+         pib_deflator,         # índice de preços - mudanças de preço
+         var_yoy_12m_preco,  # variação anual dos preços
+         num_indice,           # índice de volume - mudanças de qtd
+         var_yoy_3m_qtd, var_yoy_12m_qtd, # variação anual das quantidades
+         num_indice_sa,        # índice de volume com ajuste sazonal
+         var_qoq_qtd) |>
+  mutate(
+    pib_real_atual = pib_nominal * (
+      num_indice[id_trimestre==max(id_trimestre)] / num_indice
+    ),
+    .after = pib_real95
+  )
+
+)
+```
+
+
+```{r}
+# PIB (e componentes do PIB) 
+suppressMessages(
+  
+df.pib_componentes <- 
+  rbind(
+    # Tabela 1620 - Série encadeada do índice de volume trimestral 
+    # (Base: média 1995 = 100)
+    sidrar::get_sidra(
+      api = paste0(
+        "/t/1620/n1/all/v/all/p/all/c11255/90687,90691,90696,90707,",
+        "93404,93405,93406,93407,93408/d/v583%202"
+      )
+    ),
+    # Tabela 1846 - Valores a preços correntes (Milhões de Reais)
+    sidrar::get_sidra(
+      api = paste0(
+        "/t/1846/n1/all/v/all/p/all/c11255/90687,90691,90696,", 
+        "90707,93404,93405,93406,93407,93408/d/v585%200"
+      )
+    )
+  ) |> 
+  janitor::clean_names() |> 
+  select(
+    id_trimestre = trimestre_codigo,
+    variavel, 
+    componente = setores_e_subsetores, 
+    valor
+  ) |> 
+  mutate(
+    id_trimestre = yq(id_trimestre) |> yearquarter(),
+    
+    variavel = recode(
+      variavel,
+      "Valores a preços correntes" = "pib_nominal",
+      "Série encadeada do índice de volume trimestral (Base: média 1995 = 100)" = "num_indice"
+    ),
+    
+    componente = stringr::str_remove_all(
+      componente, 
+      " - total| a preços de mercado| \\(-\\)| de bens e serviços"
+    ) |> 
+      recode(
+        "Despesa de consumo das famílias"             = "Cons. das famílias",
+        "Despesa de consumo da administração pública" = "Desp. do governo",
+        "Formação bruta de capital fixo"              = "FBCF"
+      ) |> 
+      factor(levels=c("Agropecuária",
+                      "Indústria",
+                      "Serviços",
+                      "PIB",
+                      "Cons. das famílias",
+                      "Desp. do governo",
+                      "FBCF",
+                      "Exportação",
+                      "Importação")),
+    
+    otica = case_match(
+      componente,
+      c("Agropecuária","Indústria","Serviços") ~ "Oferta",
+      c("Cons. das famílias",
+        "Desp. do governo",
+        "FBCF",
+        "Exportação",
+        "Importação") ~ "Demanda",
+      .default = componente
+    )
+  ) |>
+  pivot_wider(names_from=variavel, values_from=valor) |>
+  as_tsibble(index = id_trimestre, key = c(componente, otica)) |> 
+  mutate(
+    # PIB nominal acumulado em 12 meses (4 trimestres)
+    pib_nominal_12m = zoo::rollsumr(pib_nominal, k=4, fill=NA),
+    
+    # Variação acumulada em 12 meses (4 trimestres)
+    var_yoy_12m_qtd = (
+      zoo::rollsumr(num_indice, k=4, fill=NA) / (
+        zoo::rollsumr(num_indice, k=8, fill=NA) - 
+          zoo::rollsumr(num_indice, k=4, fill=NA)
+      ) - 1
+    ) * 100,
+    .by = componente
   )
 
 )
@@ -307,7 +417,7 @@ Os políticos devem ser aconselhados sobre como influenciar o comportamenteo da 
 df0 <- 
   inner_join(
     df.pib |> 
-      select(id_trimestre, "PIB (var. % anual)" = var_anual),
+      select(id_trimestre, "PIB (var. % anual)" = var_yoy_12m_qtd),
     
     df.ipca |> 
       select(id_mes, var_anual) |> 
@@ -480,7 +590,7 @@ No Brasil o responsável por compilar e divulgar essas estatísticas é o **IBGE
 Saiba mais em: [https://www.ibge.gov.br/estatisticas/economicas/industria/9300-contas-nacionais-trimestrais.html?=&t=o-que-e](https://www.ibge.gov.br/estatisticas/economicas/industria/9300-contas-nacionais-trimestrais.html?=&t=o-que-e)
 
 
-### PIB
+## PIB
 
 - **O que é o PIB?**
 
@@ -492,11 +602,11 @@ O PIB mede apenas os bens e serviços finais para evitar **dupla contagem**. Por
 
 \
 
-```{r echo=FALSE, fig.width=4}
+```{r echo=FALSE, fig.width=4, fig.asp=.6}
 df.pib |>  
-  select(id_trimestre, var_anual) |> 
-  filter(!is.na(var_anual)) |> 
-  ggplot(aes(x=as_date(id_trimestre), y=var_anual)) +
+  select(id_trimestre, var_yoy_12m_qtd) |> 
+  filter(!is.na(var_yoy_12m_qtd)) |> 
+  ggplot(aes(x=as_date(id_trimestre), y=var_yoy_12m_qtd)) +
   geom_hline(yintercept=0, linetype="dashed") +
   geom_line(linewidth=.7, color="#282f6b") +
   scale_x_date(
@@ -513,6 +623,81 @@ df.pib |>
     x        = NULL, 
     y        = NULL,
     caption  = "Fonte: IBGE/SIDRA"
+  )
+```
+
+Em resumo, o PIB é um indicador que ajuda a compreender a economia como um todo, mas não expressa importantes fatores, como distribuição de renda, qualidade de vida, educação e saúde.
+
+\
+
+## Óticas do PIB
+
+O PIB pode ser expresso por **três óticas**: 
+
+- **Oferta** (produto): PIB é igual ao valor bruto da produção, a preços básicos, menos o consumo intermediário, a preços de consumidor, mais os impostos, líquidos de subsídios, sobre produtos;
+- **Demanda** (despesa): PIB é igual a despesa de consumo das famílias, mais o consumo do governo, mais o consumo das instituições sem fins de lucro a serviço das famílias (consumo final), mais a formação bruta de capital fixo, mais a variação de estoques, mais as exportações de bens e serviços, menos as importações de bens e serviços;
+- **Renda**: PIB é igual à remuneração dos empregados, mais o total dos impostos, líquidos de subsídios, sobre a produção e a importação, mais o rendimento misto bruto, mais o excedente operacional bruto.
+
+```{r fig.width=5, fig.asp=.8}
+df.pib_componentes |> 
+  filter(year(id_trimestre) >= 2000 & otica != "PIB") |> 
+  mutate(otica = factor(otica, levels=c("Oferta", "PIB", "Demanda"))) |>
+  mutate(pct = pib_nominal_12m/sum(pib_nominal_12m), 
+         .by=c(id_trimestre, otica)) |> 
+  ggplot(aes(x=as_date(id_trimestre), y=pct, 
+             color=componente, fill=componente)) +
+  facet_wrap(~otica, ncol=1) +
+  geom_area(alpha=.8) +
+  scale_y_continuous(labels=scales::label_percent(),
+                     expand=expansion(mult=c(0,NA))) +
+  scale_x_date(expand=expansion(mult=c(0.01,0.01))) +
+  scale_fill_brewer(palette="Set1") +
+  scale_color_brewer(palette="Set1") +
+  labs(
+    title = "Componentes do PIB por ótica",
+    subtitle = "Proporção de valores correntes, acumulado em 12 meses",
+    x = NULL, y = NULL,
+    caption = "Fonte: IBGE/SIDRA"
+  )
+```
+
+#### Porque os totais são diferentes em cada ótica?
+
+
+```{r}
+inner_join(
+  df.pib |> 
+  select(
+    id_trimestre, 
+    "PIB (quantidade)" = var_yoy_12m_qtd,
+    "PIB (preços)" = var_yoy_12m_preco,
+  ),
+  df.ipca |> 
+    select(id_mes, var_anual) |>
+    filter(month(id_mes) %in% c(3,6,9,12)) |>
+    mutate(id_trimestre = yearquarter(id_mes)) |>
+    as_tsibble(index = id_trimestre) |>
+    select(id_trimestre, "IPCA" = var_anual),
+  join_by(id_trimestre)
+) |> 
+  pivot_longer(-1, values_drop_na=T) |> 
+  filter(year(id_trimestre)>=2000) |>
+  # filter(quarter(id_trimestre)==4) |> 
+  # mutate(ano = year(id_trimestre)) |>
+  ggplot(aes(x=as_date(id_trimestre), y=value, color=name, group=name)) +
+  geom_line() + geom_point() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  scale_x_date(expand=expansion(mult=c(.01,.01))) +
+  scale_y_continuous(
+    labels=scales::number_format(big.mark=".", decimal.mark=",", 
+                                 suffix="%")
+  ) +
+  scale_color_brewer(palette="Set1") +
+  labs(
+    title = "Taxas de variação anual de preços (PIB e IPCA) e crescimento real do PIB",
+    subtitle = "Variação anual acumulada em 12 meses (%)",
+    x = NULL, y = NULL,
+    caption = "Fonte: IBGE/SIDRA"
   )
 ```
 
